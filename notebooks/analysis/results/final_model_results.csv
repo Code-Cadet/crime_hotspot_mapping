@@ -1,0 +1,7 @@
+,Baseline (Linear),Random Forest,Gradient Boosting,Voting Ensemble
+train_rmse,0.1204,0.0676,0.1151,0.0896
+test_rmse,0.1206,0.0907,0.1156,0.1012
+train_mae,0.0851,0.0483,0.0819,0.0645
+test_mae,0.0853,0.0636,0.0823,0.0723
+train_r2,0.1413,0.729,0.2148,0.5246
+test_r2,0.1412,0.5141,0.2108,0.3956
