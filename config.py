@@ -7,6 +7,12 @@ DATA_DIR = PROJECT_ROOT / "data"
 RAW_DATA_DIR = DATA_DIR / "raw"
 PROCESSED_DATA_DIR = DATA_DIR / "processed"
 RISK_LAYERS_DIR = DATA_DIR / "risk_layers"
+MONITORING_DIR = PROJECT_ROOT / "notebooks" / "analysis" / "monitoring"
+
+# Model monitoring parameters
+DRIFT_THRESHOLD = 0.25  # PSI threshold for significant drift
+SIGMA_THRESHOLD = 2.0   # Number of standard deviations for alerting
+ROLLING_WINDOW = 24     # Hours for rolling statistics
 
 # Simulation parameters
 SIMULATION_CONFIG = {

@@ -469,6 +469,35 @@ class CrimePredictionModel:
             "best_score": self.best_score,
             "model_results": self.model_results
         }
+    
+    def get_model_parameters(self):
+        """Get model parameters for tuning"""
+        rf_params = {
+            'randomforestclassifier__n_estimators': [50, 100, 200],
+            'randomforestclassifier__max_depth': [10, 20, None],
+            'randomforestclassifier__min_samples_split': [2, 5, 10],
+            'randomforestclassifier__min_samples_leaf': [1, 2, 4]
+        }
+        
+        xgb_params = {
+            'xgbclassifier__n_estimators': [50, 100, 200],
+            'xgbclassifier__max_depth': [3, 6, 9],
+            'xgbclassifier__learning_rate': [0.01, 0.1, 0.2],
+            'xgbclassifier__subsample': [0.8, 0.9, 1.0]
+        }
+        
+        logistic_params = {
+            'logisticregression__max_iter': [1000],  # Increased from default
+            'logisticregression__C': [0.1, 1.0, 10.0],
+            'logisticregression__class_weight': ['balanced'],
+            'logisticregression__solver': ['saga']  # Better for imbalanced data
+        }
+        
+        return {
+            "RandomForest": rf_params,
+            "XGBoost": xgb_params,
+            "LogisticRegression": logistic_params
+        }
 
 if __name__ == "__main__":
     # Example usage
@@ -486,4 +515,4 @@ if __name__ == "__main__":
         
         # Create visualizations
         predictor.plot_model_comparison()
-        predictor.plot_feature_importance() 
+        predictor.plot_feature_importance()

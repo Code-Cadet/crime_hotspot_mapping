@@ -9,9 +9,14 @@ import os
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import DASHBOARD_CONFIG, PROCESSED_DATA_DIR, ROYSAMBU_BOUNDS
+from config import (
+    DASHBOARD_CONFIG, PROCESSED_DATA_DIR, ROYSAMBU_BOUNDS,
+    MONITORING_DIR, DRIFT_THRESHOLD, SIGMA_THRESHOLD, ROLLING_WINDOW
+)
 from utils.map_utils import MapVisualizer
 from utils.chart_utils import ChartVisualizer
+from utils.monitoring_utils import ModelMonitor
+from utils.prediction_utils import predict_hotspots
 from src.data.preprocessing import CrimeDataPreprocessor
 from clustering.cluster_analysis import CrimeClusterAnalyzer
 from prediction.model_train import CrimePredictionModel
@@ -28,6 +33,7 @@ class CrimeHotspotDashboard:
         
         self.map_visualizer = MapVisualizer()
         self.chart_visualizer = ChartVisualizer()
+        self.model_monitor = ModelMonitor()
         self.data_loaded = False
         self.processed_data = None
         self.cluster_results = None
@@ -284,7 +290,7 @@ class CrimeHotspotDashboard:
                 cluster_chart = self.chart_visualizer.create_cluster_analysis_chart(
                     cluster_data.get('hotspots', [])
                 )
-                st.plotly_chart(cluster_chart, use_container_width=True)
+                st.plotly_chart(cluster_chart, use_container_width=True, key="cluster_analysis_chart")
         
         # Cluster details table
         st.subheader("📋 Cluster Details")
@@ -307,7 +313,7 @@ class CrimeHotspotDashboard:
         
         # Create risk heatmap
         risk_chart = self.chart_visualizer.create_risk_heatmap(risk_grid)
-        st.plotly_chart(risk_chart, use_container_width=True)
+        st.plotly_chart(risk_chart, use_container_width=True, key="risk_heatmap_chart")
         
         # Risk statistics
         st.subheader("📊 Risk Statistics")
@@ -346,64 +352,208 @@ class CrimeHotspotDashboard:
             st.write("**Land Use Score**")
             st.progress(self.risk_model.landuse_score.mean())
     
+    def model_monitoring_tab(self, filters):
+        """Model Monitoring Tab"""
+        st.header("📊 Model Monitoring & Drift Detection")
+        
+        # Load monitoring data
+        monitoring_path = MONITORING_DIR / "monitoring_metrics.json"
+        if monitoring_path.exists():
+            with open(monitoring_path, 'r') as f:
+                monitoring_data = json.load(f)
+        else:
+            st.warning("No monitoring data available yet. Run predictions to generate monitoring metrics.")
+            return
+        
+        # Performance Metrics
+        st.subheader("🎯 Current Performance Metrics")
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                "Predictions",
+                monitoring_data.get('n_predictions', 'N/A'),
+                delta=None
+            )
+        
+        with col2:
+            st.metric(
+                "Mean Prediction",
+                f"{monitoring_data.get('mean_prediction', 0):.3f}",
+                delta=f"{monitoring_data.get('mean_shift', 0):.3f} σ"
+            )
+        
+        with col3:
+            st.metric(
+                "Uncertainty",
+                f"{monitoring_data.get('uncertainty_mean', 0):.3f}",
+                delta=f"{monitoring_data.get('uncertainty_change', 0):.1%}"
+            )
+        
+        with col4:
+            st.metric(
+                "Prediction Range",
+                f"{monitoring_data.get('prediction_range', 0):.3f}"
+            )
+        
+        # Feature Drift Analysis
+        st.subheader("🔄 Feature Drift Analysis")
+        
+        drift_results = monitoring_data.get('drift_results', {})
+        for feature, results in drift_results.items():
+            with st.expander(f"📊 {feature.replace('_', ' ').title()}"):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.metric(
+                        "PSI Score",
+                        f"{results.get('psi', 0):.4f}",
+                        delta="Stable" if not results.get('has_drift', False) else "Drifting"
+                    )
+                    st.caption("Population Stability Index")
+                
+                with col2:
+                    st.metric(
+                        "Drift Severity",
+                        results.get('severity', 'Low'),
+                        delta=None
+                    )
+                    
+                # Display feature distribution plot if available
+                plot_path = MONITORING_DIR / f"feature_drift_{feature}.png"
+                if plot_path.exists():
+                    st.image(plot_path, caption=f"Distribution Comparison: {feature}")
+        
+        # Distribution Analysis
+        st.subheader("📈 Prediction Distribution")
+        dist_plot_path = MONITORING_DIR / "prediction_distribution.png"
+        if dist_plot_path.exists():
+            st.image(dist_plot_path, caption="Current vs Baseline Prediction Distribution")
+        
+        # Anomaly Detection
+        st.subheader("⚠️ Detected Anomalies")
+        anomalies = monitoring_data.get('anomalies', [])
+        if anomalies:
+            for anomaly in anomalies:
+                severity = anomaly.get('severity', 0)
+                st.warning(
+                    f"**{anomaly.get('type', 'Unknown')}** - "
+                    f"Severity: {severity:.2f}\n\n"
+                    f"{anomaly.get('description', '')}"
+                )
+        else:
+            st.success("No anomalies detected in current predictions")
+        
+        # Monitoring Settings
+        with st.expander("⚙️ Monitoring Configuration"):
+            st.write("**Current Thresholds:**")
+            st.write(f"- Drift Threshold (PSI): {DRIFT_THRESHOLD}")
+            st.write(f"- Anomaly Detection (σ): {SIGMA_THRESHOLD}")
+            st.write(f"- Rolling Window (hours): {ROLLING_WINDOW}")
+
     def model_metrics_tab(self, filters):
         """Model Metrics Tab"""
         st.header("🤖 Machine Learning Models")
-        
-        if self.model_results is None:
-            st.warning("No model results available. Please train models first.")
+
+        # Helper to check if results dict contains expected key
+        def has_key(results, key):
+            return isinstance(results, dict) and key in results
+
+        # Check if model_results is valid
+        if not isinstance(self.model_results, dict) or not self.model_results:
+            st.warning(
+                "⚠ No model results available. Please train models first by running:\n"
+                "```python\n"
+                "from prediction.model_train import CrimePredictionModel\n"
+                "model = CrimePredictionModel()\n"
+                "model.train()\n"
+                "```"
+            )
+            if st.button("Train Models"):
+                try:
+                    progress_text = st.empty()
+                    progress_bar = st.progress(0)
+
+                    progress_text.text("Preparing data...")
+                    progress_bar.progress(10)
+
+                    progress_text.text("Training Random Forest...")
+                    progress_bar.progress(40)
+
+                    progress_text.text("Training XGBoost...")
+                    progress_bar.progress(70)
+
+                    progress_text.text("Training Logistic Regression...")
+                    progress_bar.progress(90)
+
+                    progress_text.text("Finalizing results...")
+                    progress_bar.progress(100)
+
+                    from prediction.model_train import CrimePredictionModel
+                    model = CrimePredictionModel()
+
+                    if self.processed_data is None or self.processed_data.empty:
+                        st.error("No processed data available. Please run simulation first.")
+                        return
+
+                    with st.spinner("Training models... This may take a few minutes..."):
+                        training_results = model.run_complete_training(self.processed_data)
+                        self.model_results = training_results
+                        st.success(f"✅ Models trained successfully! "
+                                   f"Best model: {training_results.get('best_model', 'N/A')} "
+                                   f"(F1-Score: {training_results.get('best_score', 0):.4f})")
+                except Exception as e:
+                    st.error(f"❌ Error training models: {str(e)}")
             return
-        
-        # Model comparison
+
+        # Model Performance Comparison
         st.subheader("📊 Model Performance Comparison")
-        
-        if 'model_comparison' in self.model_results:
+        if has_key(self.model_results, 'model_comparison'):
             comparison_df = pd.DataFrame(self.model_results['model_comparison'])
             st.dataframe(comparison_df, use_container_width=True)
-            
-            # Create comparison chart
+
             comparison_chart = self.chart_visualizer.create_model_comparison_chart(
                 self.model_results.get('model_results', {})
             )
-            st.plotly_chart(comparison_chart, use_container_width=True)
-        
+            st.plotly_chart(comparison_chart, use_container_width=True, key="model_comparison_chart")
+        else:
+            st.info("No model comparison data available.")
+
         # Feature importance
         st.subheader("🎯 Feature Importance")
-        
-        if 'model_results' in self.model_results:
+        if has_key(self.model_results, 'model_results'):
             best_model = self.model_results.get('best_model', 'RandomForest')
             model_data = self.model_results['model_results'].get(best_model, {})
-            
             if 'top_features' in model_data:
-                feature_importance = model_data['top_features']
                 feature_chart = self.chart_visualizer.create_feature_importance_chart(
-                    feature_importance
+                    model_data['top_features']
                 )
-                st.plotly_chart(feature_chart, use_container_width=True)
-        
+                st.plotly_chart(feature_chart, use_container_width=True, key="feature_importance_chart")
+            else:
+                st.info(f"No feature importance data for {best_model}.")
+
         # Model details
         st.subheader("📋 Model Details")
-        
-        if 'model_results' in self.model_results:
+        if has_key(self.model_results, 'model_results'):
             for model_name, model_data in self.model_results['model_results'].items():
                 with st.expander(f"📈 {model_name}"):
                     st.write(f"**Best Parameters:** {model_data.get('best_params', 'N/A')}")
-                    
                     metrics = model_data.get('metrics', {})
                     if metrics:
                         col1, col2, col3 = st.columns(3)
-                        
                         with col1:
                             st.metric("Accuracy", f"{metrics.get('accuracy', 0):.3f}")
                             st.metric("Precision", f"{metrics.get('precision', 0):.3f}")
-                        
                         with col2:
                             st.metric("Recall", f"{metrics.get('recall', 0):.3f}")
                             st.metric("F1-Score", f"{metrics.get('f1_score', 0):.3f}")
-                        
                         with col3:
                             st.metric("ROC-AUC", f"{metrics.get('roc_auc', 0):.3f}")
-    
+                    else:
+                        st.info(f"No metrics available for {model_name}.")
+        else:
+            st.info("No model details available.")
+
     def time_series_tab(self, filters):
         """Time Series Analysis Tab"""
         st.header("⏰ Temporal Analysis")
@@ -428,7 +578,8 @@ class CrimeHotspotDashboard:
                 value_col='is_crime',
                 title='Crime Incidents by Hour'
             )
-            st.plotly_chart(time_chart, use_container_width=True)
+            st.plotly_chart(time_chart, use_container_width=True, 
+                            key=f"hourly_incidents_chart_{filters['hour_range'][0]}_{filters['hour_range'][1]}")
         
         with col2:
             st.subheader("📅 Crime Incidents by Day")
@@ -438,17 +589,18 @@ class CrimeHotspotDashboard:
                 value_col='is_crime',
                 title='Crime Incidents by Day of Week'
             )
-            st.plotly_chart(day_chart, use_container_width=True)
+            st.plotly_chart(day_chart, use_container_width=True, 
+                            key=f"daily_incidents_chart_{'-'.join(map(str, filters['weekday_filter']))}")
         
         # Risk distribution over time
         st.subheader("⚠️ Risk Score Distribution")
         risk_chart = self.chart_visualizer.create_risk_distribution_chart(filtered_data)
-        st.plotly_chart(risk_chart, use_container_width=True)
+        st.plotly_chart(risk_chart, use_container_width=True, key="risk_distribution_chart")
         
         # Agent activity over time
         st.subheader("👥 Agent Activity Patterns")
         activity_chart = self.chart_visualizer.create_agent_activity_chart(filtered_data)
-        st.plotly_chart(activity_chart, use_container_width=True)
+        st.plotly_chart(activity_chart, use_container_width=True, key="agent_activity_chart")
     
     def simulation_summary_tab(self, filters):
         """Simulation Summary Tab"""
@@ -493,7 +645,7 @@ class CrimeHotspotDashboard:
         episode_chart = self.chart_visualizer.create_episode_progress_chart(
             episode_stats.to_dict('records')
         )
-        st.plotly_chart(episode_chart, use_container_width=True)
+        st.plotly_chart(episode_chart, use_container_width=True, key="episode_progress_chart")
         
         # Configuration
         st.subheader("⚙️ Simulation Configuration")
@@ -512,7 +664,7 @@ class CrimeHotspotDashboard:
     
     def run_dashboard(self):
         """Run the main dashboard"""
-        st.title("🚨 Crime Hotspot Simulation & Mapping")
+        st.title("Crime Hotspot Simulation & Mapping")
         st.markdown("**Roysambu Ward, Nairobi**")
         
         # Load data
@@ -522,13 +674,14 @@ class CrimeHotspotDashboard:
         filters = self.sidebar_filters()
         
         # Main content
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-            "🗺️ Hotspot Map", 
-            "📍 Cluster View", 
-            "⚠️ Risk Surface", 
-            "🤖 Model Metrics", 
-            "⏰ Time Series", 
-            "🎮 Simulation Summary"
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+            "Hotspot Map", 
+            "Cluster View", 
+            "Risk Surface", 
+            "Model Metrics", 
+            "Model Monitoring",
+            "Time Series", 
+            "Simulation Summary"
         ])
         
         with tab1:
@@ -544,9 +697,12 @@ class CrimeHotspotDashboard:
             self.model_metrics_tab(filters)
         
         with tab5:
-            self.time_series_tab(filters)
-        
+            self.model_monitoring_tab(filters)
+            
         with tab6:
+            self.time_series_tab(filters)
+            
+        with tab7:
             self.simulation_summary_tab(filters)
         
         # Footer
@@ -558,4 +714,4 @@ class CrimeHotspotDashboard:
 
 if __name__ == "__main__":
     dashboard = CrimeHotspotDashboard()
-    dashboard.run_dashboard() 
+    dashboard.run_dashboard()

@@ -15,7 +15,7 @@ from datetime import datetime
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from src.data.preprocessing import CrimeDataPreprocessor
-from clustering.cluster_analysis import CrimeClusterAnalyzer
+from clustering.clustering import run_clustering_analysis
 from prediction.model_train import CrimePredictionModel
 from config import PROCESSED_DATA_DIR
 
@@ -35,7 +35,13 @@ def check_data_availability():
     """Check if required data files are available"""
     logger = logging.getLogger(__name__)
     
-    # Check for processed data
+    # Check for processed data - prioritize engineered_features.csv
+    engineered_features_file = PROCESSED_DATA_DIR / "engineered_features.csv"
+    if engineered_features_file.exists():
+        logger.info("Found engineered_features.csv")
+        return True
+    
+    # Fallback to old pattern
     processed_files = list(PROCESSED_DATA_DIR.glob("processed_simulation_data_*.csv"))
     if not processed_files:
         logger.error("No processed simulation data found!")
@@ -71,34 +77,31 @@ def run_data_preprocessing():
         logger.error(f"Error during data preprocessing: {str(e)}")
         return False
 
-def run_clustering_analysis():
+def run_clustering_analysis_pipeline():
     """Run clustering analysis"""
     logger = logging.getLogger(__name__)
     
     logger.info("Starting clustering analysis...")
     
     try:
-        # Load processed data
-        processed_files = list(PROCESSED_DATA_DIR.glob("processed_simulation_data_*.csv"))
-        if not processed_files:
+        # Check for engineered_features.csv
+        engineered_features_file = PROCESSED_DATA_DIR / "engineered_features.csv"
+        if not engineered_features_file.exists():
             logger.error("No processed data available for clustering")
             return False
         
-        latest_file = max(processed_files, key=lambda x: x.stat().st_mtime)
-        import pandas as pd
-        processed_data = pd.read_csv(latest_file)
-        
-        if processed_data.empty:
-            logger.error("Processed data is empty")
-            return False
-        
-        # Run clustering analysis
-        analyzer = CrimeClusterAnalyzer()
-        cluster_results = analyzer.run_complete_analysis(processed_data)
+        # Run clustering analysis using the new module
+        results = run_clustering_analysis(
+            data_path=engineered_features_file,
+            method="kmeans",
+            sample_size=10000,  # Use sample for faster processing
+            plot=False  # Disable plotting for automated pipeline
+        )
         
         logger.info("Clustering analysis completed successfully")
-        logger.info(f"K-means hotspots: {len(cluster_results['kmeans']['hotspots'])}")
-        logger.info(f"DBSCAN hotspots: {len(cluster_results['dbscan']['hotspots'])}")
+        logger.info(f"Method: {results['method']}")
+        logger.info(f"Number of clusters: {results['evaluation']['n_clusters']}")
+        logger.info(f"Silhouette score: {results['evaluation']['silhouette_score']:.3f}")
         
         return True
         
@@ -113,15 +116,22 @@ def run_model_training():
     logger.info("Starting model training...")
     
     try:
-        # Load processed data
-        processed_files = list(PROCESSED_DATA_DIR.glob("processed_simulation_data_*.csv"))
-        if not processed_files:
-            logger.error("No processed data available for model training")
-            return False
-        
-        latest_file = max(processed_files, key=lambda x: x.stat().st_mtime)
-        import pandas as pd
-        processed_data = pd.read_csv(latest_file)
+        # Load processed data - check for engineered_features.csv first
+        engineered_features_file = PROCESSED_DATA_DIR / "engineered_features.csv"
+        if engineered_features_file.exists():
+            logger.info("Found engineered_features.csv, using for model training")
+            import pandas as pd
+            processed_data = pd.read_csv(engineered_features_file)
+        else:
+            # Fallback to old pattern
+            processed_files = list(PROCESSED_DATA_DIR.glob("processed_simulation_data_*.csv"))
+            if not processed_files:
+                logger.error("No processed data available for model training")
+                return False
+            
+            latest_file = max(processed_files, key=lambda x: x.stat().st_mtime)
+            import pandas as pd
+            processed_data = pd.read_csv(latest_file)
         
         if processed_data.empty:
             logger.error("Processed data is empty")
@@ -165,7 +175,7 @@ def run_full_pipeline():
     
     # Step 3: Clustering analysis
     logger.info("\nStep 3: Clustering analysis...")
-    if not run_clustering_analysis():
+    if not run_clustering_analysis_pipeline():
         logger.error("Clustering analysis failed. Exiting.")
         return False
     
@@ -228,7 +238,7 @@ def main():
             success = run_data_preprocessing()
         elif args.cluster_only:
             logger.info("Running clustering analysis only...")
-            success = run_clustering_analysis()
+            success = run_clustering_analysis_pipeline()
         elif args.train_only:
             logger.info("Running model training only...")
             success = run_model_training()
